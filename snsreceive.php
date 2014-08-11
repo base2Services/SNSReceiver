@@ -3,10 +3,14 @@
 $MobileNOs = array("614xxxxxxxx","614xxxxxxxx");
 $Accounts = array(
   "AccountID" => "AccountAlias",
-	"AccountID2" => "AccoutnAlias2"
+	"AccountID2" => "AccountAlias2"
 	);
 $SNSDIR = "/var/sns";
+$TMPDIR = "/tmp/snstmp/"
 $NAGDIR = "/etc/nagios3/aws/";
+$SSHUSER = "factoryxicingauser";
+$NAGHOST = "master.monitoring.base2services.com";
+$SSHKEY = "/root/.ssh/factoryxicingauser.pem"
 
 if (isset($_GET['contacts'])) {
 	$contactgroups = "," . $_GET['contacts'];
@@ -16,7 +20,7 @@ if (isset($_GET['contacts'])) {
 
 error_reporting(-1);
 header("Content-type: text/html; charset=utf-8");
-require_once 'sdk-1.5.3/sdk.class.php';
+require_once 'sdk/sdk.class.php';
 
 $ec2 = new AmazonEC2();
 
@@ -74,7 +78,7 @@ if ( $_SERVER['REQUEST_METHOD'] == "POST" ) {
 				default:
 					$MessageToSend=$SNSMessagePayload->{'NewStateValue'} . ":" . $SNSMessagePayload->{'AlarmName'} . " in account: " . $Accounts[$SNSMessagePayload->{'AWSAccountId'}];
 					foreach ($MobileNOs as &$Number) {
-						sendmessage($MessageToSend, $Number);
+						#sendmessage($MessageToSend, $Number);
 					}
 				break;
 			}
@@ -119,6 +123,44 @@ function nag_reload($updown) {
 		exec('sudo /usr/sbin/service nagios3 reload');
 	}
 };
+
+
+function nag_creategroup_remote($groupname, $confdir) {
+
+	//First we need to check if the group file already exists?
+	if ( !file_exists($confdir . 'group_' . $groupname . '.cfg') ) {
+		include('group.tpl');
+		shell_exec("ssh -i $SSHKEY $SSHUSER@$NAGHOST 'mkdir $confdir/$groupname'");
+		file_put_contents($TMPDIR . 'group_' . $groupname . '.cfg', $groupdata);
+		shell_exec("scp -i $SSHKEY $TMPDIR/group_$groupname.cfg $SSHUSER@$NAGHOST:$confdir/group_$groupname.cfg");
+	}
+
+}
+
+function nag_createhost_remote($groupName, $creds, $instanceID, $contactgroups, $confdir) {
+
+	$ec2 = new AmazonEC2(array('credentials'=>$creds));
+	$ec2->set_region(AmazonEC2::REGION_US_W2);
+	$response = $ec2->describe_instances(array('InstanceId'=>$instanceID));
+	$instanceHostName  = $response->{'body'}->{'reservationSet'}->{'item'}->{'instancesSet'}->{'item'}->{'dnsName'};
+	include('host.tpl');
+	file_put_contents($TMPDIR . '/' . $instanceID . '.cfg', $hostdata);
+	shell_exec("scp -i $SSHKEY $TMPDIR/$instanceID.cfg $SSHUSER@$NAGHOST:$confdir/$groupname/$instanceID.cfg");
+}
+
+function nag_deletehost_remote($instanceID, $groupName, $confdir) {
+	shell_exec("ssh -i $SSHKEY $SSHUSER@$NAGHOST 'rm -rf $confdir/$groupname/$instanceID.cfg'");
+	#unlink($confdir . '/' . $groupName . '/' . $instanceID . '.cfg');
+}
+
+function nag_reload_remote($updown) {
+	if ( $updown == 'up' ) {
+		exec('nohup /var/www/snsreceive/nagreloadremote.sh $NAGHOST $SSHKEY $SSHUSER 300');
+	} else {
+		exec('nohup /var/www/snsreceive/nagreloadremote.sh $NAGHOST $SSHKEY $SSHUSER 0');
+	}
+};
+
 
 function nag_cleanup($groupName, $confdir) {
 
