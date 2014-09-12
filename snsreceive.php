@@ -25,7 +25,7 @@ if (isset($_GET['contacts'])) {
 if (isset($_GET['region'])) {
 	$region = $_GET['region'];
 } else {
-	$region = "";
+	$region = $DEFAULT_REGION;
 }
 
 if (isset($_GET['tier'])) {
