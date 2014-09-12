@@ -7,12 +7,14 @@ $MobileNOs = array("614xxxxxxxx","614xxxxxxxx");
 #  "AccountID" => "AccountAlias",
 #	"AccountID2" => "AccountAlias2"
 #	);
-$SNSDIR = "<SNS Spool directory for outputting requests>";
-$TMPDIR = "<local temporary location>";
-$NAGDIR = "<directory to create hostgroups and drop config files>";
-$SSHUSER = "<your nagios/icinga ssh user>";
-$NAGHOST = "<your nagios/icinga host>";
-$SSHKEY = "<your ssh key>";
+$SNSDIR = "/var/sns";
+$TMPDIR = "/tmp/sns";
+$NAGDIR = "<Nagios/icinga location on your master>";
+$SSHUSER = "<ssh user on your master>";
+$NAGHOST = "<hostname of your master>";
+$SSHKEY = "<full path to some ssh key>";
+$CUSTOMER= "<some cutomer>";
+$DEFAULT_REGION="ap-southeast-2"
 
 if (isset($_GET['contacts'])) {
 	$contactgroups = "," . $_GET['contacts'];
@@ -20,17 +22,32 @@ if (isset($_GET['contacts'])) {
 	$contactgroups = "";
 }
 
+if (isset($_GET['region'])) {
+	$region = $_GET['region'];
+} else {
+	$region = "";
+}
+
+if (isset($_GET['tier'])) {
+        $tier = $_GET['tier'];
+} else {
+        $tier = "";
+}
+
+
 error_reporting(-1);
 header("Content-type: text/html; charset=utf-8");
-require_once 'aws.phar';
+#require_once 'aws.phar';
 
 #$ec2 = new AmazonEC2();
+
+include 'vendor/autoload.php';
 
 use Aws\Common\Aws;
 
 $aws = Aws::factory(array(
-    'profile' => '',
-    'region'  => '',
+    'profile' => $CUSTOMER,
+    'region'  => $region,
 ));
 
 use Aws\Ec2\Ec2Client;
@@ -76,13 +93,13 @@ if ( $_SERVER['REQUEST_METHOD'] == "POST" ) {
 					switch($SNSMessagePayload->{'Event'}) {
 
 						case 'autoscaling:EC2_INSTANCE_LAUNCH';
-							nag_creategroup_remote($SNSMessagePayload->{'AutoScalingGroupName'}, $NAGDIR, $TMPDIR, $SSHKEY, $SSHUSER, $NAGHOST);
-							nag_createhost_remote($SNSMessagePayload->{'AutoScalingGroupName'}, $SNSMessagePayload->{'AccountId'}, $SNSMessagePayload->{'EC2InstanceId'}, $contactgroups, $NAGDIR, $TMPDIR, $SSHKEY, $SSHUSER, $NAGHOST);
+							nag_creategroup_remote($SNSMessagePayload->{'AutoScalingGroupName'}, $NAGDIR, $TMPDIR, $SSHKEY, $SSHUSER, $NAGHOST, $tier);
+							nag_createhost_remote($SNSMessagePayload->{'AutoScalingGroupName'}, $SNSMessagePayload->{'AccountId'}, $SNSMessagePayload->{'EC2InstanceId'}, $contactgroups, $NAGDIR, $TMPDIR, $SSHKEY, $SSHUSER, $NAGHOST, $region, $CUSTOMER);
 							nag_reload_remote('up', $TMPDIR, $SSHKEY, $SSHUSER, $NAGHOST);
 						break;
 
 						case 'autoscaling:EC2_INSTANCE_TERMINATE';
-							nag_deletehost_remote($SNSMessagePayload->{'EC2InstanceId'}, $SNSMessagePayload->{'AutoScalingGroupName'}, $NAGDIR, $TMPDIR, $SSHKEY, $SSHUSER, $NAGHOST);
+							nag_deletehost_remote($SNSMessagePayload->{'EC2InstanceId'}, $SNSMessagePayload->{'AutoScalingGroupName'}, $NAGDIR, $TMPDIR, $SSHKEY, $SSHUSER, $NAGHOST, $region, $CUSTOMER);
 							nag_reload_remote('down', $TMPDIR, $SSHKEY, $SSHUSER, $NAGHOST);
 						break;
 					}
@@ -112,8 +129,8 @@ function nag_creategroup($groupname, $confdir) {
 
 function nag_createhost($groupName, $creds, $instanceID, $contactgroups, $confdir) {
          $aws = Aws::factory(array(
-            'profile' => '',
-            'region'  => '',
+            'profile' => $CUSTOMER,
+            'region'  => $region,
         ));
 
         $ec2 = $aws->get('Ec2');
@@ -148,38 +165,45 @@ function nag_reload($updown) {
 };
 
 
-function nag_creategroup_remote($groupname, $confdir, $TMPDIR, $SSHKEY, $SSHUSER, $NAGHOST) {
+function nag_creategroup_remote($groupname, $confdir, $TMPDIR, $SSHKEY, $SSHUSER, $NAGHOST, $tier) {
 
-	include('group.tpl');
-	shell_exec("ssh -i $SSHKEY $SSHUSER@$NAGHOST 'mkdir $confdir/$groupname'");
+  if ( $tier != '') {
+          include("group_$tier.tpl");
+  } else {
+          include("group.tpl");
+  }
+	shell_exec("ssh -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -i $SSHKEY $SSHUSER@$NAGHOST 'mkdir $confdir/$groupname'");
 	file_put_contents($TMPDIR . '/group_' . $groupname . '.cfg', $groupdata);
-	shell_exec("scp -i $SSHKEY $TMPDIR/group_$groupname.cfg $SSHUSER@$NAGHOST:$confdir/group_$groupname.cfg");
+	shell_exec("scp -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -i $SSHKEY $TMPDIR/group_$groupname.cfg $SSHUSER@$NAGHOST:$confdir/group_$groupname.cfg");
 
 }
 
-function nag_createhost_remote($groupName, $creds, $instanceID, $contactgroups, $confdir, $TMPDIR, $SSHKEY, $SSHUSER, $NAGHOST) {
-	 $aws = Aws::factory(array(
-	    'profile' => '',
-	    'region'  => '',
+function nag_createhost_remote($groupName, $creds, $instanceID, $contactgroups, $confdir, $TMPDIR, $SSHKEY, $SSHUSER, $NAGHOST, $region, $CUSTOMER) {
+	$aws = Aws::factory(array(
+		'profile' => $CUSTOMER,
+		'region'  => $region,
 	));
 
-        $ec2 = $aws->get('Ec2');
-        $response = $ec2->describeInstances(array('InstanceIds'=>array($instanceID)));
+  $ec2 = $aws->get('Ec2');
+  $response = $ec2->describeInstances(array('InstanceIds'=>array($instanceID)));
 	$reservations = $response['Reservations'];
 	foreach ($reservations as $reservation) {
 		$instances = $reservation['Instances'];
 		foreach ($instances as $instance) {
-		        $instanceHostName  = $instance['PrivateIpAddress'];
+		  $instanceHostName  = $instance['PrivateIpAddress'];
 		}
 	}
 
+
+▽
+
 	include('host.tpl');
 	file_put_contents($TMPDIR . '/' . $instanceID . '.cfg', $hostdata);
-	shell_exec("scp -i $SSHKEY $TMPDIR/$instanceID.cfg $SSHUSER@$NAGHOST:$confdir/$groupName/$instanceID.cfg");
+	shell_exec("scp -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -i $SSHKEY $TMPDIR/$instanceID.cfg $SSHUSER@$NAGHOST:$confdir/$groupName/$instanceID.cfg");
 }
 
 function nag_deletehost_remote($instanceID, $groupName, $confdir, $TMPDIR, $SSHKEY, $SSHUSER, $NAGHOST) {
-	shell_exec("ssh -i $SSHKEY $SSHUSER@$NAGHOST 'rm -rf $confdir/$groupName/$instanceID.cfg'");
+	shell_exec("ssh -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -i $SSHKEY $SSHUSER@$NAGHOST 'rm -rf $confdir/$groupName/$instanceID.cfg'");
 }
 
 function nag_reload_remote($updown, $TMPDIR, $SSHKEY, $SSHUSER, $NAGHOST) {
